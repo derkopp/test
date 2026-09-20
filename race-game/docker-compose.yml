@@ -1,0 +1,5 @@
+services:
+  race-game:
+    build: .
+    ports:
+      - "8000:80"

@@ -15,6 +15,23 @@ python3 -m http.server 8000
 
 Danach im Browser öffnen: [http://localhost:8000](http://localhost:8000)
 
+### Alternative: mit Docker
+
+```bash
+cd race-game
+docker compose up --build
+```
+
+Oder ohne Compose:
+
+```bash
+cd race-game
+docker build -t race-game .
+docker run --rm -p 8000:80 race-game
+```
+
+Danach ebenfalls im Browser öffnen: [http://localhost:8000](http://localhost:8000)
+
 ## Steuerung
 
 | Taste | Aktion |
@@ -31,7 +48,9 @@ race-game/
 ├── index.html          Seite mit Canvas, HUD und Startbildschirm
 ├── style.css            Layout und Design der Oberfläche
 ├── main.js               Szene, Auto, Steuerung, Kamera, Spiel-Loop
-└── vendor/three/         Lokal eingebundenes Three.js (funktioniert offline)
+├── vendor/three/         Lokal eingebundenes Three.js (funktioniert offline)
+├── Dockerfile             Statische Dateien in einem nginx-Container ausliefern
+└── docker-compose.yml     Bequemer Start des Containers
 ```
 
 ## Stand der Grundlagen
