@@ -1,0 +1,7 @@
+services:
+  ruhestandsrechner:
+    build: .
+    container_name: ruhestandsrechner
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
