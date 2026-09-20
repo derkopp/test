@@ -6,7 +6,13 @@ Das ist erst die **Grundlage**: eine 3D-Welt mit Boden, einer ovalen Rennstrecke
 
 ## Starten
 
-Weil das Spiel ES-Module lädt, muss es über einen lokalen Webserver geöffnet werden (nicht einfach die `index.html` per Doppelklick öffnen).
+### Variante 1: Eine einzige Datei herunterladen (am einfachsten)
+
+**[`Autorennen.html`](./Autorennen.html)** enthält alles in einer Datei (HTML, CSS, Spiel-Code und Three.js). Einfach herunterladen und per Doppelklick im Browser öffnen — kein Server, keine Installation, kein Internet nötig.
+
+### Variante 2: lokaler Webserver
+
+`index.html` lädt Three.js als ES-Modul und braucht deshalb einen lokalen Webserver (nicht per Doppelklick öffnen):
 
 ```bash
 cd race-game
@@ -15,7 +21,7 @@ python3 -m http.server 8000
 
 Danach im Browser öffnen: [http://localhost:8000](http://localhost:8000)
 
-### Alternative: mit Docker
+### Variante 3: mit Docker
 
 ```bash
 cd race-game
@@ -45,13 +51,16 @@ Danach ebenfalls im Browser öffnen: [http://localhost:8000](http://localhost:80
 
 ```
 race-game/
-├── index.html          Seite mit Canvas, HUD und Startbildschirm
-├── style.css            Layout und Design der Oberfläche
-├── main.js               Szene, Auto, Steuerung, Kamera, Spiel-Loop
-├── vendor/three/         Lokal eingebundenes Three.js (funktioniert offline)
-├── Dockerfile             Statische Dateien in einem nginx-Container ausliefern
-└── docker-compose.yml     Bequemer Start des Containers
+├── Autorennen.html        Alles in einer Datei — herunterladen & per Doppelklick öffnen
+├── index.html            Seite mit Canvas, HUD und Startbildschirm (für die Server-Variante)
+├── style.css               Layout und Design der Oberfläche
+├── main.js                  Szene, Auto, Steuerung, Kamera, Spiel-Loop
+├── vendor/three/            Lokal eingebundenes Three.js (funktioniert offline)
+├── Dockerfile                Statische Dateien in einem nginx-Container ausliefern
+└── docker-compose.yml        Bequemer Start des Containers
 ```
+
+`Autorennen.html` ist eine eigenständige Kopie des Spiels (praktisch zum Weitergeben/Herunterladen). Wenn wir Gameplay-Änderungen machen, passen wir `main.js` **und** `Autorennen.html` an.
 
 ## Stand der Grundlagen
 
