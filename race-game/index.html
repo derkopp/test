@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3D Autorennen</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+
+  <div id="hud">
+    <div id="speed">0 km/h</div>
+  </div>
+
+  <div id="instructions">
+    <p>&#8593; / W &mdash; Gas geben</p>
+    <p>&#8595; / S &mdash; Bremsen / Rückwärts</p>
+    <p>&#8592; &#8594; / A D &mdash; Lenken</p>
+  </div>
+
+  <div id="start-overlay">
+    <h1>🏎️ 3D Autorennen</h1>
+    <p>Klicke oder drücke eine Taste, um zu starten</p>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/three.module.min.js"
+      }
+    }
+  </script>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
