@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import altair as alt
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -23,11 +24,26 @@ def fmt_eur(value: float) -> str:
     return f"{value:,.0f} €".replace(",", ".")
 
 
-def simulate(
+def fmt_pct(value: float) -> str:
+    return f"{value * 100:,.1f} %".replace(",", ".")
+
+
+def annual_to_monthly_rate(annual_rate):
+    """Convert one or many annual rates to the equivalent monthly rate.
+
+    Clipped at -99.9% so a very bad random draw doesn't take the base of
+    the fractional power to zero or negative.
+    """
+    base = np.clip(1 + annual_rate, 0.001, None)
+    return base ** (1 / 12) - 1
+
+
+def simulate_deterministic(
     current_age: int,
     retirement_age: int,
     current_capital: float,
     monthly_savings: float,
+    savings_growth: float,
     annual_return_savings: float,
     annual_return_withdrawal: float,
     annual_inflation: float,
@@ -36,6 +52,7 @@ def simulate(
     keep_saving_in_retirement: bool,
     extra_monthly_saving: float,
 ):
+    """Single expected-value path with fixed, non-random assumptions."""
     months_accum = max(0, round((retirement_age - current_age) * 12))
     months_decum = max(0, round(withdrawal_years * 12))
 
@@ -45,8 +62,10 @@ def simulate(
     capital = current_capital
     history = [(0, capital)]
 
-    for _ in range(months_accum):
-        capital = capital * (1 + r1) + monthly_savings
+    for m in range(months_accum):
+        year_index = m // 12
+        savings_this_month = monthly_savings * (1 + savings_growth) ** year_index
+        capital = capital * (1 + r1) + savings_this_month
         history.append((history[-1][0] + 1, capital))
 
     capital_at_retirement = capital
@@ -85,6 +104,95 @@ def simulate(
     }
 
 
+def simulate_monte_carlo(
+    n_sims: int,
+    seed: int,
+    current_age: int,
+    retirement_age: int,
+    current_capital: float,
+    monthly_savings: float,
+    savings_growth: float,
+    mean_return_savings: float,
+    vol_return_savings: float,
+    mean_return_withdrawal: float,
+    vol_return_withdrawal: float,
+    mean_inflation: float,
+    vol_inflation: float,
+    monthly_withdrawal_today: float,
+    withdrawal_years: int,
+    keep_saving_in_retirement: bool,
+    extra_monthly_saving: float,
+    target_leftover_today: float,
+):
+    """Vectorised Monte-Carlo simulation across `n_sims` random paths.
+
+    A new annual return and a new annual inflation rate are drawn per
+    simulated year (not per month) so a single bad/good year affects all
+    twelve months the same way, in line with how sequence-of-returns risk
+    is usually modelled.
+    """
+    rng = np.random.default_rng(seed if seed else None)
+
+    months_accum = max(0, round((retirement_age - current_age) * 12))
+    months_decum = max(0, round(withdrawal_years * 12))
+    total_months = months_accum + months_decum
+
+    capital = np.full(n_sims, current_capital, dtype=float)
+    inflation_index = np.ones(n_sims, dtype=float)
+
+    real_history = np.zeros((n_sims, total_months + 1))
+    real_history[:, 0] = capital / inflation_index
+
+    monthly_r = monthly_infl = None
+    year_index = 0
+    for m in range(months_accum):
+        if m % 12 == 0:
+            annual_r = rng.normal(mean_return_savings, vol_return_savings, n_sims)
+            monthly_r = annual_to_monthly_rate(annual_r)
+            annual_infl = np.clip(
+                rng.normal(mean_inflation, vol_inflation, n_sims), -0.5, None
+            )
+            monthly_infl = annual_to_monthly_rate(annual_infl)
+            savings_this_year = monthly_savings * (1 + savings_growth) ** year_index
+            year_index += 1
+        capital = capital * (1 + monthly_r) + savings_this_year
+        inflation_index = inflation_index * (1 + monthly_infl)
+        real_history[:, m + 1] = capital / inflation_index
+
+    depleted = np.zeros(n_sims, dtype=bool)
+    monthly_r2 = monthly_infl2 = None
+    for m in range(months_decum):
+        if m % 12 == 0:
+            annual_r2 = rng.normal(mean_return_withdrawal, vol_return_withdrawal, n_sims)
+            monthly_r2 = annual_to_monthly_rate(annual_r2)
+            annual_infl2 = np.clip(
+                rng.normal(mean_inflation, vol_inflation, n_sims), -0.5, None
+            )
+            monthly_infl2 = annual_to_monthly_rate(annual_infl2)
+
+        if keep_saving_in_retirement:
+            cashflow = np.full(n_sims, extra_monthly_saving)
+        else:
+            cashflow = -(monthly_withdrawal_today * inflation_index)
+
+        capital = capital * (1 + monthly_r2) + cashflow
+        inflation_index = inflation_index * (1 + monthly_infl2)
+        depleted = depleted | (capital < 0)
+        real_history[:, months_accum + m + 1] = capital / inflation_index
+
+    final_capital_real = capital / inflation_index
+    success = (~depleted) & (final_capital_real >= target_leftover_today)
+
+    return {
+        "real_history": real_history,
+        "final_capital_real": final_capital_real,
+        "success_prob": float(success.mean()),
+        "depleted_prob": float(depleted.mean()),
+        "months_accum": months_accum,
+        "total_months": total_months,
+    }
+
+
 st.markdown("# 🧓 Ruhestandsrechner")
 st.write(
     "Finde heraus, ob dein aktuelles Vermögen und dein Sparplan ausreichen, um "
@@ -115,7 +223,19 @@ with col1:
         "Aktuell vorhandenes Vermögen (€)", min_value=0.0, value=20000.0, step=1000.0
     )
     monthly_savings = st.number_input(
-        "Monatliche Sparrate im Sparplan (€)", min_value=0.0, value=400.0, step=50.0
+        "Monatliche Sparrate im Sparplan, heute (€)",
+        min_value=0.0,
+        value=400.0,
+        step=50.0,
+    )
+    savings_growth_pct = st.number_input(
+        "Jährliche Steigerung der Sparrate (%)",
+        min_value=-10.0,
+        max_value=20.0,
+        value=0.0,
+        step=0.5,
+        help="Z. B. durch Gehaltssteigerungen: Die Sparrate wird jedes Jahr "
+        "um diesen Prozentsatz erhöht.",
     )
 with col2:
     annual_return_savings_pct = st.number_input(
@@ -178,11 +298,62 @@ with col2:
         step=1000.0,
     )
 
-result = simulate(
+st.header("4. Unsicherheit (Monte-Carlo-Simulation)")
+run_monte_carlo = st.checkbox(
+    "Schwankende Rendite & Inflation simulieren, um eine "
+    "Erfolgswahrscheinlichkeit zu berechnen",
+    value=False,
+)
+
+if run_monte_carlo:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        vol_savings_pct = st.number_input(
+            "Volatilität der Verzinsung – Ansparphase "
+            "(Std.-Abw., % p.a.)",
+            min_value=0.0,
+            max_value=40.0,
+            value=15.0,
+            step=1.0,
+        )
+    with col2:
+        vol_withdrawal_pct = st.number_input(
+            "Volatilität der Verzinsung – Entnahmephase "
+            "(Std.-Abw., % p.a.)",
+            min_value=0.0,
+            max_value=40.0,
+            value=8.0,
+            step=1.0,
+        )
+    with col3:
+        vol_inflation_pct = st.number_input(
+            "Volatilität der Inflation (Std.-Abw., % p.a.)",
+            min_value=0.0,
+            max_value=10.0,
+            value=1.0,
+            step=0.5,
+        )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        n_sims = st.slider(
+            "Anzahl Simulationen", min_value=200, max_value=5000, value=1000, step=200
+        )
+    with col2:
+        seed = st.number_input(
+            "Zufalls-Seed (0 = jedes Mal neu zufällig)",
+            min_value=0,
+            max_value=1_000_000,
+            value=0,
+            step=1,
+        )
+
+result = simulate_deterministic(
     current_age=int(current_age),
     retirement_age=int(retirement_age),
     current_capital=current_capital,
     monthly_savings=monthly_savings,
+    savings_growth=savings_growth_pct / 100,
     annual_return_savings=annual_return_savings_pct / 100,
     annual_return_withdrawal=annual_return_withdrawal_pct / 100,
     annual_inflation=annual_inflation_pct / 100,
@@ -192,7 +363,8 @@ result = simulate(
     extra_monthly_saving=extra_monthly_saving,
 )
 
-st.header("4. Ergebnis")
+st.header("5. Ergebnis")
+st.subheader("Erwartungswert-Szenario")
 
 col1, col2 = st.columns(2)
 col1.metric(
@@ -207,13 +379,13 @@ col2.metric(
 surplus = result["final_capital_real"] - target_leftover_today
 if surplus >= 0:
     st.success(
-        f"✅ Dein Geld reicht voraussichtlich aus. Am Ende bleiben "
+        f"✅ Im Erwartungswert-Szenario reicht dein Geld aus. Am Ende bleiben "
         f"{fmt_eur(surplus)} mehr übrig als dein gewünschtes Restvermögen "
         f"von {fmt_eur(target_leftover_today)}."
     )
 else:
     st.error(
-        f"❌ Dein Geld reicht voraussichtlich nicht aus. Es fehlen "
+        f"❌ Im Erwartungswert-Szenario reicht dein Geld nicht aus. Es fehlen "
         f"{fmt_eur(-surplus)}, um dein gewünschtes Restvermögen von "
         f"{fmt_eur(target_leftover_today)} zu erreichen."
     )
@@ -223,6 +395,60 @@ if result["depletion_age"] is not None:
         f"⚠️ Bei diesen Annahmen wäre dein Vermögen bereits mit rund "
         f"{result['depletion_age']:.1f} Jahren aufgebraucht."
     )
+
+mc_result = None
+if run_monte_carlo:
+    mc_result = simulate_monte_carlo(
+        n_sims=int(n_sims),
+        seed=int(seed),
+        current_age=int(current_age),
+        retirement_age=int(retirement_age),
+        current_capital=current_capital,
+        monthly_savings=monthly_savings,
+        savings_growth=savings_growth_pct / 100,
+        mean_return_savings=annual_return_savings_pct / 100,
+        vol_return_savings=vol_savings_pct / 100,
+        mean_return_withdrawal=annual_return_withdrawal_pct / 100,
+        vol_return_withdrawal=vol_withdrawal_pct / 100,
+        mean_inflation=annual_inflation_pct / 100,
+        vol_inflation=vol_inflation_pct / 100,
+        monthly_withdrawal_today=monthly_withdrawal_today,
+        withdrawal_years=int(withdrawal_years),
+        keep_saving_in_retirement=keep_saving_in_retirement,
+        extra_monthly_saving=extra_monthly_saving,
+        target_leftover_today=target_leftover_today,
+    )
+
+    st.subheader("Monte-Carlo-Simulation")
+    st.caption(
+        f"Basiert auf {n_sims:,}".replace(",", ".")
+        + " zufälligen Verläufen mit schwankender Rendite und Inflation "
+        "um die oben angegebenen Erwartungswerte."
+    )
+
+    success_pct = mc_result["success_prob"]
+    col1, col2 = st.columns(2)
+    col1.metric("Erfolgswahrscheinlichkeit", fmt_pct(success_pct))
+    col2.metric(
+        "Wahrscheinlichkeit, dass das Geld vorzeitig ausgeht",
+        fmt_pct(mc_result["depleted_prob"]),
+    )
+
+    if success_pct >= 0.8:
+        st.success(
+            f"✅ In {fmt_pct(success_pct)} der simulierten Verläufe reicht "
+            "dein Geld für dein gewünschtes Restvermögen aus."
+        )
+    elif success_pct >= 0.5:
+        st.warning(
+            f"⚠️ Nur in {fmt_pct(success_pct)} der simulierten Verläufe "
+            "reicht dein Geld aus – ein spürbares Risiko bleibt."
+        )
+    else:
+        st.error(
+            f"❌ Nur in {fmt_pct(success_pct)} der simulierten Verläufe "
+            "reicht dein Geld aus."
+        )
 
 st.subheader("Vermögensverlauf")
 
@@ -260,8 +486,73 @@ rule = (
 st.altair_chart((line + rule).interactive(), use_container_width=True)
 st.caption(
     "Die gestrichelte Linie markiert den Beginn der Entnahmephase "
-    "(Renteneintritt)."
+    "(Renteneintritt). Werte in heutiger Kaufkraft."
 )
+
+if mc_result is not None:
+    st.subheader("Bandbreite möglicher Verläufe (Monte-Carlo)")
+
+    real_history = mc_result["real_history"]
+    ages_mc = np.array([current_age + m / 12 for m in range(real_history.shape[1])])
+    p10 = np.percentile(real_history, 10, axis=0)
+    p50 = np.percentile(real_history, 50, axis=0)
+    p90 = np.percentile(real_history, 90, axis=0)
+
+    band_df = pd.DataFrame(
+        {"Alter": ages_mc, "p10": p10, "p50": p50, "p90": p90}
+    )
+
+    band = (
+        alt.Chart(band_df)
+        .mark_area(opacity=0.25, color="#4c78a8")
+        .encode(x="Alter", y=alt.Y("p10", title="Vermögen (heutige Kaufkraft, €)"), y2="p90")
+    )
+    median_line = (
+        alt.Chart(band_df)
+        .mark_line(color="#4c78a8")
+        .encode(x="Alter", y="p50")
+    )
+    zero_line = (
+        alt.Chart(pd.DataFrame({"y": [0]}))
+        .mark_rule(strokeDash=[2, 2], color="crimson")
+        .encode(y="y")
+    )
+    mc_rule = (
+        alt.Chart(pd.DataFrame({"Alter": [retirement_age]}))
+        .mark_rule(strokeDash=[4, 4], color="gray")
+        .encode(x="Alter")
+    )
+
+    st.altair_chart(
+        (band + median_line + zero_line + mc_rule).interactive(),
+        use_container_width=True,
+    )
+    st.caption(
+        "Blaues Band: 10.–90. Perzentil aller simulierten Verläufe, "
+        "dunkle Linie: Median. Werte in heutiger Kaufkraft."
+    )
+
+    st.subheader("Verteilung des Endvermögens")
+    hist_df = pd.DataFrame({"Endvermögen (€)": mc_result["final_capital_real"]})
+    histogram = (
+        alt.Chart(hist_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("Endvermögen (€)", bin=alt.Bin(maxbins=40)),
+            y=alt.Y("count()", title="Anzahl Simulationen"),
+        )
+    )
+    target_rule = (
+        alt.Chart(pd.DataFrame({"x": [target_leftover_today]}))
+        .mark_rule(strokeDash=[4, 4], color="crimson")
+        .encode(x="x")
+    )
+    st.altair_chart((histogram + target_rule).interactive(), use_container_width=True)
+    st.caption(
+        "Verteilung des inflationsbereinigten Endvermögens über alle "
+        "Simulationen. Die gestrichelte Linie zeigt dein gewünschtes "
+        "Restvermögen."
+    )
 
 with st.expander("Annahmen & Berechnungsweise"):
     st.markdown(
@@ -269,15 +560,23 @@ with st.expander("Annahmen & Berechnungsweise"):
         - Zinsen werden monatlich verzinst (aus der jährlichen Verzinsung
           abgeleitet).
         - Während der Ansparphase wächst dein Vermögen durch die monatliche
-          Sparrate und die angegebene Verzinsung.
+          Sparrate (optional mit jährlicher Steigerung) und die angegebene
+          Verzinsung.
         - Die monatliche Entnahme wird über die Entnahmephase hinweg mit der
           Inflation erhöht, damit die **reale Kaufkraft** der Entnahme
           konstant bleibt.
         - Alle Endergebnisse werden mit der Inflation auf heutige Kaufkraft
           abgezinst, damit sie direkt mit deinen heutigen Wunschbeträgen
           vergleichbar sind.
+        - Die Monte-Carlo-Simulation zieht für jedes Jahr eine zufällige
+          Verzinsung (normalverteilt um deine Erwartungswerte mit der
+          angegebenen Volatilität) sowie eine zufällige Inflation und wendet
+          sie auf alle zwölf Monate dieses Jahres an. Die
+          Erfolgswahrscheinlichkeit ist der Anteil der Simulationen, in
+          denen das Vermögen nie unter null fällt **und** am Ende
+          mindestens dein gewünschtes Restvermögen erreicht wird.
         - Dies ist eine vereinfachte Modellrechnung ohne Steuern, Gebühren
-          oder Marktschwankungen und ersetzt keine individuelle
-          Finanzberatung.
+          oder Marktschwankungen innerhalb eines Jahres und ersetzt keine
+          individuelle Finanzberatung.
         """
     )
